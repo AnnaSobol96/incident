@@ -15,18 +15,25 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 WEBHOOK_URL = 'https://incident-evai.onrender.com'
 WEBHOOK_PATH = '/webhook'
 
-# Простой обработчик для всех текстовых сообщений
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    logger.info(f"Получено сообщение: {message.text}")
-    bot.reply_to(message, f"Вы написали: {message.text}")
-
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
+        
+        # Если есть сообщение с текстом
+        if update.message and update.message.text:
+            chat_id = update.message.chat.id
+            text = update.message.text
+            logger.info(f"Получено сообщение: {text} от {chat_id}")
+            
+            # Отвечаем
+            try:
+                bot.send_message(chat_id, f"Вы написали: {text}")
+                logger.info(f"Ответ отправлен в {chat_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения: {e}")
+        
         return ''
     else:
         return 'Invalid content type', 403
