@@ -1,282 +1,317 @@
 import os
-import telebot
-from telebot import types
-from flask import Flask, request
+import requests
+from flask import Flask, request, jsonify
 import logging
-import time
+import json
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ============ НАСТРОЙКА БОТА ============
+# ============ КОНФИГУРАЦИЯ ============
 
-# Токен из переменных окружения
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8590157858:AAGVPYg1DHXNQaSbrdce7lfxq-RyMtufi5Y')
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-logger.info("✅ Бот инициализирован")
+# Токен вашего бота
+TELEGRAM_TOKEN = '8590157858:AAGVPYg1DHXNQaSbrdce7lfxq-RyMtufi5Y'
+TELEGRAM_API_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}'
 
 # URL вашего приложения
 WEBHOOK_URL = 'https://incident-evai.onrender.com'
 WEBHOOK_PATH = '/webhook'
 
-# ============ ПРОСТЫЕ КЛАВИАТУРЫ ============
+# ============ ФУНКЦИИ ДЛЯ РАБОТЫ С TELEGRAM API ============
+
+def send_message(chat_id, text, reply_markup=None):
+    """Отправка сообщения через Telegram API"""
+    url = f'{TELEGRAM_API_URL}/sendMessage'
+    data = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    
+    if reply_markup:
+        data['reply_markup'] = json.dumps(reply_markup)
+    
+    try:
+        response = requests.post(url, json=data)
+        logger.info(f"📤 Отправлено сообщение в {chat_id}: {response.status_code}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки: {e}")
+        return None
 
 def get_district_keyboard():
-    """Простая клавиатура с районами"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    
-    # Несколько тестовых районов
-    districts = [
-        "Кабанский", "Закаменский", "Бичурский",
-        "Кяхтинский", "Муйский", "Курумканский"
-    ]
-    
-    for district in districts:
-        keyboard.add(types.KeyboardButton(district))
-    
-    return keyboard
+    """Клавиатура с районами"""
+    return {
+        'keyboard': [
+            [
+                {'text': 'Кабанский'}, {'text': 'Закаменский'}, {'text': 'Бичурский'}
+            ],
+            [
+                {'text': 'Кяхтинский'}, {'text': 'Муйский'}, {'text': 'Курумканский'}
+            ],
+            [
+                {'text': 'Мухоршибирский'}, {'text': 'Тарбагатайский'}, {'text': 'Тункинский'}
+            ],
+            [
+                {'text': 'НА ПЛАНЕРКУ ГЛАВЫ'}
+            ]
+        ],
+        'resize_keyboard': True,
+        'one_time_keyboard': False
+    }
 
 def get_category_keyboard():
-    """Простая клавиатура с категориями"""
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    
-    categories = [
-        "Дороги", "Транспорт", "Госуслуги",
-        "Благоустройство", "Иное", "Здравоохранение"
-    ]
-    
-    for category in categories:
-        keyboard.add(types.KeyboardButton(category))
-    
-    keyboard.add(types.KeyboardButton("↩️ Назад"))
-    
-    return keyboard
+    """Клавиатура с категориями"""
+    return {
+        'keyboard': [
+            [
+                {'text': 'Дороги'}, {'text': 'Транспорт'}, {'text': 'Госуслуги'}
+            ],
+            [
+                {'text': 'Благоустройство'}, {'text': 'Иное'}, {'text': 'Здравоохранение'}
+            ],
+            [
+                {'text': '↩️ Назад к выбору района'}
+            ]
+        ],
+        'resize_keyboard': True,
+        'one_time_keyboard': False
+    }
 
-# ============ ПРОСТЫЕ FLASK РОУТЫ ============
+# Хранилище состояния пользователей
+user_data = {}
+
+# ============ FLASK РОУТЫ ============
 
 @app.route('/')
 def index():
     return '''
-    <h1>🤖 Тестовый бот Бурятия</h1>
-    <p>Бот в тестовом режиме</p>
-    <p><a href="/set_webhook">Установить вебхук</a></p>
-    <p><a href="/test">Проверить бота</a></p>
-    <p><strong>Токен:</strong> Установлен</p>
+    <h1>🤖 Бот для обращений Бурятия</h1>
+    <p>Бот использует прямое Telegram API</p>
+    <p><a href="/set_webhook">Установить вебхук через API</a></p>
+    <p><a href="/check_bot">Проверить бота</a></p>
+    <p><strong>Статус:</strong> ✅ Работает через прямое API</p>
     '''
 
 @app.route('/set_webhook')
 def set_webhook():
+    """Установка вебхука через прямое API"""
     try:
         # Удаляем старый вебхук
-        bot.remove_webhook()
-        time.sleep(1)
+        requests.get(f'{TELEGRAM_API_URL}/deleteWebhook')
         
         # Устанавливаем новый
-        webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        result = bot.set_webhook(url=webhook_url)
+        response = requests.post(
+            f'{TELEGRAM_API_URL}/setWebhook',
+            json={'url': f'{WEBHOOK_URL}{WEBHOOK_PATH}'}
+        )
         
-        if result:
-            # Проверяем установку
-            webhook_info = bot.get_webhook_info()
-            return f'''
-            <h1>✅ Вебхук установлен!</h1>
-            <p>URL: {webhook_url}</p>
-            <p>Ожидающие обновления: {webhook_info.pending_update_count}</p>
-            <p><strong>Теперь отправьте /start боту @IncidentInfo_bot</strong></p>
-            '''
-        else:
-            return "<h1>❌ Не удалось установить вебхук</h1>"
-            
-    except Exception as e:
-        return f"<h1>❌ Ошибка: {str(e)}</h1>"
-
-@app.route('/test')
-def test_bot():
-    """Проверка работы бота"""
-    try:
-        bot_info = bot.get_me()
-        webhook_info = bot.get_webhook_info()
+        result = response.json()
         
         return f'''
-        <h1>🤖 Проверка бота</h1>
-        <p>Имя бота: {bot_info.first_name}</p>
-        <p>Username: @{bot_info.username}</p>
-        <p>ID: {bot_info.id}</p>
-        <p>Вебхук: {webhook_info.url}</p>
-        <p>Статус вебхука: {webhook_info.pending_update_count} ожидающих</p>
-        <p><strong>Если вебхук не установлен - перейдите на /set_webhook</strong></p>
+        <h1>✅ Вебхук установлен через API</h1>
+        <p>Результат: {result}</p>
+        <p><a href="/check_webhook">Проверить вебхук</a></p>
+        <p>Теперь отправьте /start боту @IncidentInfo_bot</p>
         '''
     except Exception as e:
-        return f"<h1>❌ Ошибка: {str(e)}</h1>"
+        return f'<h1>❌ Ошибка: {str(e)}</h1>', 500
+
+@app.route('/check_bot')
+def check_bot():
+    """Проверка информации о боте"""
+    try:
+        response = requests.get(f'{TELEGRAM_API_URL}/getMe')
+        bot_info = response.json()
+        
+        return f'''
+        <h1>🤖 Информация о боте</h1>
+        <pre>{json.dumps(bot_info, indent=2, ensure_ascii=False)}</pre>
+        <p><a href="/">← На главную</a></p>
+        '''
+    except Exception as e:
+        return f'<h1>❌ Ошибка: {str(e)}</h1>', 500
+
+@app.route('/check_webhook')
+def check_webhook():
+    """Проверка статуса вебхука"""
+    try:
+        response = requests.get(f'{TELEGRAM_API_URL}/getWebhookInfo')
+        webhook_info = response.json()
+        
+        return f'''
+        <h1>🌐 Статус вебхука</h1>
+        <pre>{json.dumps(webhook_info, indent=2, ensure_ascii=False)}</pre>
+        <p><a href="/">← На главную</a></p>
+        '''
+    except Exception as e:
+        return f'<h1>❌ Ошибка: {str(e)}</h1>', 500
 
 # ============ ОСНОВНОЙ ВЕБХУК ============
 
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
-    """Обработчик вебхука"""
-    if request.headers.get('content-type') == 'application/json':
-        try:
-            # Получаем данные
-            json_string = request.get_data().decode('utf-8')
-            logger.info("📩 Получено сообщение от Telegram")
-            
-            # Обрабатываем через telebot
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-            
-            return 'OK'
-        except Exception as e:
-            logger.error(f"Ошибка в вебхуке: {e}")
-            return 'Error', 500
-    return 'Invalid content type', 403
-
-# ============ ПРОСТЫЕ ОБРАБОТЧИКИ БОТА ============
-
-# Словарь для хранения состояния пользователей
-user_states = {}
-
-@bot.message_handler(commands=['start', 'help'])
-def handle_start(message):
-    """Обработчик /start"""
-    logger.info(f"Пользователь {message.chat.id} начал работу")
-    
-    # Сохраняем начальное состояние
-    user_states[message.chat.id] = {'step': 'district'}
-    
-    bot.send_message(
-        message.chat.id,
-        f"👋 Привет, {message.from_user.first_name}!\n\n"
-        "Я бот для сбора обращений по Бурятии.\n\n"
-        "📍 <b>Выберите район:</b>",
-        parse_mode="HTML",
-        reply_markup=get_district_keyboard()
-    )
-
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    """Обработчик всех сообщений"""
-    chat_id = message.chat.id
-    text = message.text
-    
-    logger.info(f"Сообщение от {chat_id}: {text}")
-    
-    # Если это районы
-    districts = ["Кабанский", "Закаменский", "Бичурский", 
-                 "Кяхтинский", "Муйский", "Курумканский"]
-    
-    categories = ["Дороги", "Транспорт", "Госуслуги", 
-                  "Благоустройство", "Иное", "Здравоохранение"]
-    
-    if text in districts:
-        # Пользователь выбрал район
-        user_states[chat_id] = {
-            'step': 'category',
-            'district': text
-        }
+    """Основной обработчик вебхука через прямое API"""
+    try:
+        # Получаем данные от Telegram
+        data = request.get_json()
+        logger.info(f"📩 Получены данные: {json.dumps(data, indent=2)[:500]}...")
         
-        bot.send_message(
-            chat_id,
-            f"📍 <b>Район:</b> {text}\n\n"
-            "🏷️ <b>Выберите категорию:</b>",
-            parse_mode="HTML",
-            reply_markup=get_category_keyboard()
-        )
-    
-    elif text in categories:
-        # Пользователь выбрал категорию
-        if chat_id in user_states and 'district' in user_states[chat_id]:
-            district = user_states[chat_id]['district']
-            user_states[chat_id]['category'] = text
-            user_states[chat_id]['step'] = 'text'
+        # Проверяем, что это сообщение
+        if 'message' in data:
+            message = data['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            user_id = message['from']['id']
             
-            bot.send_message(
-                chat_id,
-                f"🏷️ <b>Категория:</b> {text}\n\n"
-                "📝 <b>Опишите ваше обращение:</b>",
-                parse_mode="HTML",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
-        else:
-            bot.send_message(
-                chat_id,
-                "Сначала выберите район!",
-                reply_markup=get_district_keyboard()
-            )
-    
-    elif text == "↩️ Назад":
-        # Возврат к выбору района
-        user_states[chat_id] = {'step': 'district'}
-        bot.send_message(
-            chat_id,
-            "📍 Выберите район:",
-            reply_markup=get_district_keyboard()
-        )
-    
-    else:
-        # Текстовое обращение или неизвестная команда
-        if chat_id in user_states and user_states[chat_id].get('step') == 'text':
-            # Пользователь отправляет текст обращения
-            if 'district' in user_states[chat_id] and 'category' in user_states[chat_id]:
-                district = user_states[chat_id]['district']
-                category = user_states[chat_id]['category']
+            logger.info(f"💬 Сообщение от {user_id} (chat_id: {chat_id}): {text}")
+            
+            # Обработка команды /start
+            if text == '/start' or text == '/start@IncidentInfo_bot':
+                # Приветственное сообщение
+                welcome_text = f"""
+👋 Здравствуйте, {message['from'].get('first_name', 'пользователь')}!
+
+Я бот для сбора обращений по Бурятии.
+
+📍 <b>Выберите район:</b>
+"""
+                send_message(chat_id, welcome_text, get_district_keyboard())
                 
-                bot.send_message(
+                # Сбрасываем состояние пользователя
+                user_data[chat_id] = {'step': 'district'}
+            
+            # Обработка кнопки "НА ПЛАНЕРКУ ГЛАВЫ"
+            elif text == 'НА ПЛАНЕРКУ ГЛАВЫ':
+                user_data[chat_id] = {
+                    'district': 'НА ПЛАНЕРКУ ГЛАВЫ',
+                    'category': 'Планерка',
+                    'step': 'text'
+                }
+                
+                send_message(
                     chat_id,
-                    f"✅ <b>Спасибо! Ваше обращение получено:</b>\n\n"
-                    f"📍 Район: {district}\n"
-                    f"🏷️ Категория: {category}\n"
-                    f"📝 Текст: {text}\n\n"
-                    "Для нового обращения отправьте /start",
-                    parse_mode="HTML",
-                    reply_markup=types.ReplyKeyboardRemove()
+                    "📍 <b>Вы выбрали: НА ПЛАНЕРКУ ГЛАВЫ</b>\n\n"
+                    "📝 <b>Пожалуйста, опишите ваше обращение:</b>",
+                    {'remove_keyboard': True}
+                )
+            
+            # Обработка выбора обычного района
+            elif text in ['Кабанский', 'Закаменский', 'Бичурский', 'Кяхтинский', 
+                          'Муйский', 'Курумканский', 'Мухоршибирский', 
+                          'Тарбагатайский', 'Тункинский']:
+                
+                user_data[chat_id] = {
+                    'district': text,
+                    'step': 'category'
+                }
+                
+                send_message(
+                    chat_id,
+                    f"📍 <b>Вы выбрали район:</b> {text}\n\n"
+                    "🏷️ <b>Теперь выберите категорию обращения:</b>",
+                    get_category_keyboard()
+                )
+            
+            # Обработка выбора категории
+            elif text in ['Дороги', 'Транспорт', 'Госуслуги', 'Благоустройство', 
+                          'Иное', 'Здравоохранение']:
+                
+                if chat_id in user_data and user_data[chat_id].get('step') == 'category':
+                    user_data[chat_id]['category'] = text
+                    user_data[chat_id]['step'] = 'text'
+                    
+                    send_message(
+                        chat_id,
+                        f"🏷️ <b>Вы выбрали категорию:</b> {text}\n\n"
+                        "📝 <b>Теперь подробно опишите ваше обращение:</b>",
+                        {'remove_keyboard': True}
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        "⚠️ Сначала выберите район!",
+                        get_district_keyboard()
+                    )
+            
+            # Обработка кнопки "Назад"
+            elif text == '↩️ Назад к выбору района':
+                user_data[chat_id] = {'step': 'district'}
+                send_message(
+                    chat_id,
+                    "📍 <b>Выберите район:</b>",
+                    get_district_keyboard()
+                )
+            
+            # Обработка текстового обращения
+            elif chat_id in user_data and user_data[chat_id].get('step') == 'text':
+                district = user_data[chat_id].get('district', 'Не указан')
+                category = user_data[chat_id].get('category', 'Не указана')
+                
+                # Формируем ответ
+                response_text = f"""
+✅ <b>Ваше обращение принято!</b>
+
+📍 <b>Район:</b> {district}
+🏷️ <b>Категория:</b> {category}
+📝 <b>Ваш текст:</b> {text}
+
+<i>Спасибо за обращение! Оно будет рассмотрено.</i>
+
+Для нового обращения отправьте /start
+"""
+                
+                send_message(
+                    chat_id,
+                    response_text,
+                    {'remove_keyboard': True}
                 )
                 
-                # Очищаем состояние
-                user_states.pop(chat_id, None)
-            else:
-                bot.send_message(
+                # Очищаем данные пользователя
+                if chat_id in user_data:
+                    del user_data[chat_id]
+            
+            # Обработка любого другого текста
+            elif text and not text.startswith('/'):
+                send_message(
                     chat_id,
-                    "Что-то пошло не так. Отправьте /start",
-                    reply_markup=types.ReplyKeyboardRemove()
+                    "Для начала работы отправьте /start",
+                    get_district_keyboard()
                 )
-        else:
-            # Простое сообщение
-            bot.send_message(
-                chat_id,
-                "Для начала работы отправьте /start",
-                reply_markup=get_district_keyboard()
-            )
+        
+        return jsonify({'ok': True})
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в вебхуке: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 # ============ ЗАПУСК ============
 
-if __name__ == "__main__":
-    logger.info("🚀 Запуск бота...")
+if __name__ == '__main__':
+    logger.info("🚀 Запуск приложения с прямым Telegram API...")
     
-    # Пытаемся установить вебхук при запуске
+    # Автоматически устанавливаем вебхук при запуске
     try:
-        bot.remove_webhook()
-        time.sleep(2)
+        # Удаляем старый вебхук
+        requests.get(f'{TELEGRAM_API_URL}/deleteWebhook')
         
-        webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        logger.info(f"Устанавливаю вебхук: {webhook_url}")
+        # Устанавливаем новый
+        response = requests.post(
+            f'{TELEGRAM_API_URL}/setWebhook',
+            json={'url': f'{WEBHOOK_URL}{WEBHOOK_PATH}'}
+        )
         
-        success = bot.set_webhook(url=webhook_url)
-        
-        if success:
-            logger.info("✅ Вебхук установлен")
+        if response.json().get('ok'):
+            logger.info("✅ Вебхук установлен автоматически")
         else:
-            logger.error("❌ Не удалось установить вебхук")
-            
+            logger.error(f"❌ Ошибка установки вебхука: {response.json()}")
     except Exception as e:
-        logger.error(f"Ошибка установки вебхука: {e}")
+        logger.error(f"❌ Ошибка при установке вебхука: {e}")
     
     # Запускаем Flask
     port = int(os.getenv('PORT', 10000))
-    logger.info(f"Запуск на порту {port}")
+    logger.info(f"🚀 Запуск на порту {port}")
     app.run(host='0.0.0.0', port=port)
