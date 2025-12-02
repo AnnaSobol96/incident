@@ -1,6 +1,6 @@
-# 🤖 Telegram Bot для сбора обращений в Бурятии
+# 🤖 Бот для сбора обращений - Бурятия
 
-Бот для сбора обращений граждан с автоматической записью в Google Таблицы.
+Telegram бот для сбора обращений граждан с автоматической записью в Google Таблицы.
 
 ## 🚀 Возможности
 
@@ -8,9 +8,9 @@
 - 23 категории обращений
 - Автоматическая запись в Google Sheets
 - Интерактивное меню с кнопками
-- Недельная и месячная статистика
+- Резервное сохранение (заглушка при отсутствии Google Sheets)
 
-## 🛠 Технологии
+## 🔧 Технологии
 
 - Python 3.11
 - Flask + Gunicorn
@@ -24,19 +24,18 @@
 
 ```bash
 # Клонировать репозиторий
-git clone https://github.com/ваш-username/telegram-bot-buryatia.git
-cd telegram-bot-buryatia
+git clone https://github.com/AnnaSobol96/incident.git
+cd incident
 
 # Создать виртуальное окружение
 python -m venv venv
-source venv/bin/activate  # На Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Установить зависимости
 pip install -r requirements.txt
 
 # Создать файл .env
-echo "TELEGRAM_BOT_TOKEN=ваш_токен" > .env
-echo "GOOGLE_CREDENTIALS='{\"type\": \"service_account\", ...}'" >> .env
+echo "TELEGRAM_TOKEN=8590157858:AAGVPYg1DHXNQaSbrdce7lfxq-RyMtufi5Y" > .env
 
 # Запустить бота
 python app.py
