@@ -2,14 +2,17 @@ import os
 import telebot
 from telebot import types
 import gspread
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from threading import Lock
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import json
 from google.oauth2.service_account import Credentials
 import logging
-import requests
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из .env файла (для локальной разработки)
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,18 +25,77 @@ logger = logging.getLogger(__name__)
 # Инициализация Flask приложения
 app = Flask(__name__)
 
-# ============ КОНФИГУРАЦИЯ ============
+# ============ НАСТРОЙКА БОТА ============
 
-# НОВЫЙ ТОКЕН БОТА
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8590157858:AAGVPYg1DHXNQaSbrdce7lfxq-RyMtufi5Y')
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-logger.info(f"✅ Бот инициализирован с токеном: {TELEGRAM_TOKEN[:10]}...")
+# ТОКЕН БЕРЕТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_TOKEN не установлен в переменных окружения!")
+    logger.error("Добавьте TELEGRAM_TOKEN в Render Environment Variables")
+    # Для локальной разработки можно раскомментировать строку ниже:
+    # TELEGRAM_TOKEN = "ваш_токен_для_локальной_разработки"
+    # Но не коммитьте этот токен в репозиторий!
 
-# URL вашего приложения на Render
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://incident-evai.onrender.com')
+if TELEGRAM_TOKEN:
+    bot = telebot.TeleBot(TELEGRAM_TOKEN)
+    logger.info("✅ Бот инициализирован с токеном из переменных окружения")
+else:
+    # Создаем заглушку бота для тестирования без токена
+    logger.warning("⚠️ Бот не инициализирован - отсутствует TELEGRAM_TOKEN")
+    bot = None
+
+# URL вашего Render приложения
+WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://incident-evai.onrender.com')
 WEBHOOK_PATH = '/webhook'
 
-# ============ ДАННЫЕ ДЛЯ БОТА ============
+# ============ ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ============
+
+def init_google_sheets():
+    """Инициализация подключения к Google Sheets"""
+    try:
+        google_creds_json = os.getenv('GOOGLE_CREDENTIALS')
+        if google_creds_json:
+            # Убираем экранирование
+            google_creds_json = google_creds_json.strip().replace('\\n', '\n')
+            
+            # Если есть внешние кавычки, убираем их
+            if google_creds_json.startswith('"') and google_creds_json.endswith('"'):
+                google_creds_json = google_creds_json[1:-1]
+            
+            credentials_dict = json.loads(google_creds_json)
+            
+            scopes = ['https://www.googleapis.com/auth/spreadsheets']
+            credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
+            gc = gspread.authorize(credentials)
+            logger.info("✅ Google Sheets подключена через переменные окружения")
+            
+            spreadsheet = gc.open("google-api-sheets-incident")
+            logger.info("✅ Таблица открыта")
+            return spreadsheet
+            
+        else:
+            # Для локальной разработки
+            try:
+                gc = gspread.service_account(filename="clever.json")
+                spreadsheet = gc.open("google-api-sheets-incident")
+                logger.info("✅ Google Sheets подключена через файл clever.json")
+                return spreadsheet
+            except:
+                logger.info("⚠️ GOOGLE_CREDENTIALS не установлен и файл clever.json не найден")
+                return None
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+        return None
+
+# Инициализируем Google Sheets
+spreadsheet = init_google_sheets()
+
+# Хранилище данных пользователей
+user_data = {}
+write_lock = Lock()
+
+# ============ СПИСКИ ДЛЯ КЛАВИАТУР ============
 
 DISTRICTS = [
     "Кабанский", "Закаменский", "Бичурский", "Кяхтинский", 
@@ -54,69 +116,41 @@ CATEGORIES = [
     "Общ- полит.вопросы", "Туризм"
 ]
 
-# Хранилище данных пользователей
-user_data = {}
-write_lock = Lock()
+ORDINARY_DISTRICTS = [d for d in DISTRICTS if d != "НА ПЛАНЕРКУ ГЛАВЫ"]
 
-# ============ GOOGLE SHEETS ============
+# ============ ФУНКЦИИ GOOGLE SHEETS ============
 
-def init_google_sheets():
-    """Инициализация подключения к Google Sheets"""
-    try:
-        google_creds_json = os.getenv('GOOGLE_CREDENTIALS')
-        if google_creds_json:
-            # Обработка JSON из переменной окружения
-            google_creds_json = google_creds_json.strip()
-            if google_creds_json.startswith('"') and google_creds_json.endswith('"'):
-                google_creds_json = google_creds_json[1:-1]
-            
-            # Заменяем экранированные символы
-            google_creds_json = google_creds_json.replace('\\n', '\n').replace('\\"', '"')
-            
-            credentials_dict = json.loads(google_creds_json)
-            
-            scopes = [
-                'https://www.googleapis.com/auth/spreadsheets',
-                'https://www.googleapis.com/auth/drive'
-            ]
-            
-            credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
-            gc = gspread.authorize(credentials)
-            logger.info("✅ Google Sheets подключена через переменные окружения")
-        else:
-            # Для локальной разработки
-            gc = gspread.service_account(filename="clever.json")
-            logger.info("✅ Google Sheets подключена через файл clever.json")
-        
-        # Открываем таблицу
-        spreadsheet = gc.open("google-api-sheets-incident")
-        logger.info("✅ Таблица 'google-api-sheets-incident' открыта")
-        return spreadsheet
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
-        # Создаем заглушку для тестирования
-        logger.warning("⚠️ Используется заглушка Google Sheets для тестирования")
-        return None
-
-# Инициализируем Google Sheets
-spreadsheet = init_google_sheets()
-
-def save_to_google_sheets(district, category, text):
-    """Сохраняет обращение в Google Sheets"""
+def get_current_sheet():
+    """Получает текущий месячный лист"""
     if not spreadsheet:
-        logger.info(f"📝 Заглушка: сохранено обращение - {district}, {category}, {text}")
-        return True
+        logger.info("📝 Используется заглушка Google Sheets")
+        return None
+    
+    current_month = datetime.now().strftime("%Y-%m")
     
     try:
-        # Получаем текущий лист
-        current_month = datetime.now().strftime("%Y-%m")
-        
+        sheet = spreadsheet.worksheet(current_month)
+        return sheet
+    except Exception:
         try:
-            sheet = spreadsheet.worksheet(current_month)
-        except:
             sheet = spreadsheet.add_worksheet(title=current_month, rows=1000, cols=20)
             sheet.append_row(["Дата и время", "Район", "Категория обращения", "Текст обращения"])
+            return sheet
+        except Exception as e:
+            logger.error(f"Ошибка создания листа: {e}")
+            return None
+
+def save_to_sheets(district, category, text):
+    """Сохраняет обращение в Google Sheets"""
+    try:
+        if not spreadsheet:
+            # Заглушка для тестирования
+            logger.info(f"📝 Тестовая запись: {district}, {category}, {text}")
+            return True
+        
+        sheet = get_current_sheet()
+        if not sheet:
+            return False
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         row_data = [timestamp, district, category, text]
@@ -127,7 +161,7 @@ def save_to_google_sheets(district, category, text):
         logger.info(f"✅ Данные сохранены в Google Sheets: {district} - {category}")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения в Google Sheets: {e}")
+        logger.error(f"❌ Ошибка сохранения: {e}")
         return False
 
 # ============ КЛАВИАТУРЫ ============
@@ -136,7 +170,9 @@ def create_district_keyboard():
     """Создает клавиатуру с районами"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     
-    buttons = [types.KeyboardButton(district) for district in DISTRICTS]
+    buttons = []
+    for district in DISTRICTS:
+        buttons.append(types.KeyboardButton(district))
     
     for i in range(0, len(buttons), 3):
         markup.add(*buttons[i:i+3])
@@ -147,7 +183,9 @@ def create_category_keyboard():
     """Создает клавиатуру с категориями"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     
-    buttons = [types.KeyboardButton(category) for category in CATEGORIES]
+    buttons = []
+    for category in CATEGORIES:
+        buttons.append(types.KeyboardButton(category))
     
     for i in range(0, len(buttons), 3):
         markup.add(*buttons[i:i+3])
@@ -167,7 +205,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🤖 Бот для обращений Бурятия</title>
+        <title>🤖 Бот для обращений - Бурятия</title>
         <style>
             body {
                 font-family: Arial, sans-serif;
@@ -189,6 +227,13 @@ def index():
             }
             .status {
                 background: #4CAF50;
+                color: white;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }
+            .warning {
+                background: #ff9800;
                 color: white;
                 padding: 15px;
                 border-radius: 5px;
@@ -220,25 +265,41 @@ def index():
             <h1>🤖 Бот для сбора обращений - Бурятия</h1>
             <p>Telegram бот для сбора обращений граждан с записью в Google Таблицы</p>
             
+            ''' + (f'''
             <div class="status">
                 ✅ <strong>Статус:</strong> Система работает
             </div>
+            ''' if bot else '''
+            <div class="warning">
+                ⚠️ <strong>Статус:</strong> Бот не инициализирован
+            </div>
+            ''') + '''
             
             <div class="section">
                 <h3>⚙️ Управление</h3>
+                ''' + ('''
                 <a class="btn" href="/set_webhook">Установить вебхук</a>
                 <a class="btn" href="/health">Проверить здоровье</a>
                 <a class="btn" href="/bot_info">Информация о боте</a>
+                ''' if bot else '''
+                <p><strong>Для работы бота необходимо:</strong></p>
+                <ol>
+                    <li>Добавить переменную окружения TELEGRAM_TOKEN в Render</li>
+                    <li>Перезапустить приложение</li>
+                </ol>
+                ''') + '''
             </div>
             
             <div class="section">
                 <h3>📊 Статистика</h3>
-                <p><strong>Районов:</strong> 23</p>
-                <p><strong>Категорий:</strong> 23</p>
+                <p><strong>Районов:</strong> ''' + str(len(DISTRICTS)) + '''</p>
+                <p><strong>Категорий:</strong> ''' + str(len(CATEGORIES)) + '''</p>
                 <p><strong>Google Sheets:</strong> ''' + ("✅ Подключена" if spreadsheet else "⚠️ Заглушка") + '''</p>
                 <p><strong>Вебхук:</strong> ''' + f'{WEBHOOK_URL}{WEBHOOK_PATH}' + '''</p>
+                <p><strong>Токен бота:</strong> ''' + ("✅ Установлен" if TELEGRAM_TOKEN else "❌ Отсутствует") + '''</p>
             </div>
             
+            ''' + ('''
             <div class="section">
                 <h3>🔧 Использование</h3>
                 <ol>
@@ -248,6 +309,7 @@ def index():
                     <li>Данные автоматически сохранятся в Google Таблицы</li>
                 </ol>
             </div>
+            ''' if bot else '') + '''
         </div>
     </body>
     </html>
@@ -256,24 +318,21 @@ def index():
 @app.route('/health')
 def health_check():
     """Проверка здоровья приложения"""
-    try:
-        bot_info = bot.get_me()
-        return jsonify({
-            "status": "ok",
-            "bot": bot_info.username,
-            "bot_id": bot_info.id,
-            "google_sheets": "connected" if spreadsheet else "stub",
-            "timestamp": datetime.now().isoformat(),
-            "webhook_url": f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return {
+        "status": "ok" if bot else "error",
+        "bot_initialized": bool(bot),
+        "google_sheets": bool(spreadsheet),
+        "timestamp": datetime.now().isoformat(),
+        "webhook_url": f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    }
 
 @app.route('/set_webhook')
 def set_webhook_route():
     """Установка вебхука"""
+    if not bot:
+        return "<h1>❌ Бот не инициализирован</h1><p>Установите TELEGRAM_TOKEN в переменных окружения</p>", 500
+    
     try:
-        # Удаляем старый вебхук
         bot.remove_webhook()
         time.sleep(1)
         
@@ -297,47 +356,20 @@ def set_webhook_route():
         logger.error(f"Ошибка установки вебхука: {e}")
         return f"<h1>❌ Ошибка: {str(e)}</h1>", 500
 
-@app.route('/bot_info')
-def bot_info():
-    """Информация о боте"""
-    try:
-        bot_user = bot.get_me()
-        webhook_info = bot.get_webhook_info()
-        
-        return jsonify({
-            "bot": {
-                "id": bot_user.id,
-                "username": bot_user.username,
-                "first_name": bot_user.first_name,
-                "is_bot": bot_user.is_bot
-            },
-            "webhook": {
-                "url": webhook_info.url,
-                "pending_updates": webhook_info.pending_update_count,
-                "last_error_date": webhook_info.last_error_date,
-                "last_error_message": webhook_info.last_error_message
-            },
-            "server": {
-                "url": WEBHOOK_URL,
-                "timestamp": datetime.now().isoformat()
-            }
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 # ============ ВЕБХУК ============
 
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
     """Обработчик вебхука от Telegram"""
+    if not bot:
+        return "Bot not initialized", 500
+    
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
         
-        # Логируем получение обновления
         logger.info(f"📩 Получено обновление #{update.update_id}")
         
-        # Обрабатываем обновление
         bot.process_new_updates([update])
         return ''
     else:
@@ -345,112 +377,113 @@ def webhook():
 
 # ============ ОБРАБОТЧИКИ ТЕЛЕГРАМ БОТА ============
 
-@bot.message_handler(commands=['start', 'help'])
-def handle_start(message):
-    """Обработчик команд /start и /help"""
-    logger.info(f"👤 Пользователь {message.chat.id} начал работу")
-    
-    user_data[message.chat.id] = {}
-    
-    bot.send_message(
-        message.chat.id,
-        f"👋 Здравствуйте, {message.from_user.first_name}!\n\n"
-        f"Вас приветствует бот для сбора обращений граждан Бурятии.\n\n"
-        f"📋 <b>Как это работает:</b>\n"
-        f"1. Выберите район из списка\n"
-        f"2. Выберите категорию обращения\n"
-        f"3. Опишите вашу проблему\n\n"
-        f"📊 <b>Все обращения записываются в Google Таблицы</b>\n\n"
-        f"📍 <b>Выберите район:</b>",
-        parse_mode="HTML",
-        reply_markup=create_district_keyboard()
-    )
-
-@bot.message_handler(func=lambda message: message.text in DISTRICTS)
-def handle_district(message):
-    """Обработчик выбора района"""
-    user_id = message.chat.id
-    district = message.text
-    
-    logger.info(f"📍 Пользователь {user_id} выбрал район: {district}")
-    
-    user_data[user_id] = {'district': district}
-    
-    bot.send_message(
-        user_id,
-        f"📍 <b>Вы выбрали район:</b> {district}\n\n"
-        f"🏷️ <b>Теперь выберите категорию обращения:</b>",
-        parse_mode="HTML",
-        reply_markup=create_category_keyboard()
-    )
-
-@bot.message_handler(func=lambda message: message.text in CATEGORIES)
-def handle_category(message):
-    """Обработчик выбора категории"""
-    user_id = message.chat.id
-    category = message.text
-    
-    logger.info(f"🏷️ Пользователь {user_id} выбрал категорию: {category}")
-    
-    if user_id not in user_data or 'district' not in user_data[user_id]:
+if bot:
+    @bot.message_handler(commands=['start', 'help'])
+    def handle_start(message):
+        """Обработчик команд /start и /help"""
+        logger.info(f"👤 Пользователь {message.chat.id} начал работу")
+        
+        user_data[message.chat.id] = {}
+        
         bot.send_message(
-            user_id,
-            "⚠️ Пожалуйста, сначала выберите район!",
+            message.chat.id,
+            f"👋 Здравствуйте, {message.from_user.first_name}!\n\n"
+            f"Вас приветствует бот для сбора обращений граждан Бурятии.\n\n"
+            f"📋 <b>Как это работает:</b>\n"
+            f"1. Выберите район из списка\n"
+            f"2. Выберите категорию обращения\n"
+            f"3. Опишите вашу проблему\n\n"
+            f"📊 <b>Все обращения записываются в Google Таблицы</b>\n\n"
+            f"📍 <b>Выберите район:</b>",
+            parse_mode="HTML",
             reply_markup=create_district_keyboard()
         )
-        return
     
-    user_data[user_id]['category'] = category
-    user_data[user_id]['waiting_for_text'] = True
-    
-    bot.send_message(
-        user_id,
-        f"🏷️ <b>Вы выбрали категорию:</b> {category}\n\n"
-        f"📝 <b>Теперь подробно опишите ваше обращение:</b>\n\n"
-        f"<i>Опишите проблему максимально подробно, укажите адрес, если это возможно</i>",
-        parse_mode="HTML",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-
-@bot.message_handler(func=lambda message: message.text == "↩️ Назад к выбору района")
-def handle_back(message):
-    """Обработчик кнопки 'Назад'"""
-    user_id = message.chat.id
-    
-    logger.info(f"↩️ Пользователь {user_id} вернулся к выбору района")
-    
-    if user_id in user_data:
-        user_data[user_id] = {}
-    
-    bot.send_message(
-        user_id,
-        "📍 Выберите район:",
-        reply_markup=create_district_keyboard()
-    )
-
-@bot.message_handler(func=lambda message: True, content_types=['text'])
-def handle_text(message):
-    """Обработчик текстового обращения"""
-    user_id = message.chat.id
-    
-    # Пропускаем команду "Назад"
-    if message.text == "↩️ Назад к выбору района":
-        return
-    
-    if user_id in user_data and user_data[user_id].get('waiting_for_text'):
-        user_text = message.text
+    @bot.message_handler(func=lambda message: message.text in DISTRICTS)
+    def handle_district(message):
+        """Обработчик выбора района"""
+        user_id = message.chat.id
+        district = message.text
         
-        logger.info(f"📝 Пользователь {user_id} отправил обращение")
+        logger.info(f"📍 Пользователь {user_id} выбрал район: {district}")
         
-        # Сохраняем данные
-        district = user_data[user_id]['district']
-        category = user_data[user_id]['category']
+        user_data[user_id] = {'district': district}
         
-        # Сохраняем в Google Sheets
-        success = save_to_google_sheets(district, category, user_text)
+        bot.send_message(
+            user_id,
+            f"📍 <b>Вы выбрали район:</b> {district}\n\n"
+            f"🏷️ <b>Теперь выберите категорию обращения:</b>",
+            parse_mode="HTML",
+            reply_markup=create_category_keyboard()
+        )
+    
+    @bot.message_handler(func=lambda message: message.text in CATEGORIES)
+    def handle_category(message):
+        """Обработчик выбора категории"""
+        user_id = message.chat.id
+        category = message.text
         
-        if success:
-            response = f"""
+        logger.info(f"🏷️ Пользователь {user_id} выбрал категорию: {category}")
+        
+        if user_id not in user_data or 'district' not in user_data[user_id]:
+            bot.send_message(
+                user_id,
+                "⚠️ Пожалуйста, сначала выберите район!",
+                reply_markup=create_district_keyboard()
+            )
+            return
+        
+        user_data[user_id]['category'] = category
+        user_data[user_id]['waiting_for_text'] = True
+        
+        bot.send_message(
+            user_id,
+            f"🏷️ <b>Вы выбрали категорию:</b> {category}\n\n"
+            f"📝 <b>Теперь подробно опишите ваше обращение:</b>\n\n"
+            f"<i>Опишите проблему максимально подробно, укажите адрес, если это возможно</i>",
+            parse_mode="HTML",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+    
+    @bot.message_handler(func=lambda message: message.text == "↩️ Назад к выбору района")
+    def handle_back(message):
+        """Обработчик кнопки 'Назад'"""
+        user_id = message.chat.id
+        
+        logger.info(f"↩️ Пользователь {user_id} вернулся к выбору района")
+        
+        if user_id in user_data:
+            user_data[user_id] = {}
+        
+        bot.send_message(
+            user_id,
+            "📍 Выберите район:",
+            reply_markup=create_district_keyboard()
+        )
+    
+    @bot.message_handler(func=lambda message: True, content_types=['text'])
+    def handle_text(message):
+        """Обработчик текстового обращения"""
+        user_id = message.chat.id
+        
+        # Пропускаем команду "Назад"
+        if message.text == "↩️ Назад к выбору района":
+            return
+        
+        if user_id in user_data and user_data[user_id].get('waiting_for_text'):
+            user_text = message.text
+            
+            logger.info(f"📝 Пользователь {user_id} отправил обращение")
+            
+            # Сохраняем данные
+            district = user_data[user_id]['district']
+            category = user_data[user_id]['category']
+            
+            # Сохраняем в Google Sheets
+            success = save_to_sheets(district, category, user_text)
+            
+            if success:
+                response = f"""
 ✅ <b>Ваше обращение принято и сохранено!</b>
 
 📍 <b>Район:</b> {district}
@@ -462,58 +495,61 @@ def handle_text(message):
 
 Для нового обращения выберите район:
 """
-        else:
-            response = """
+            else:
+                response = """
 ❌ <b>Произошла ошибка при сохранении обращения.</b>
 
 Пожалуйста, попробуйте еще раз позже или свяжитесь с администратором.
 
 Выберите район для нового обращения:
 """
-        
+            
+            bot.send_message(
+                user_id,
+                response,
+                parse_mode="HTML",
+                reply_markup=create_district_keyboard()
+            )
+            
+            # Очищаем данные пользователя
+            if user_id in user_data:
+                del user_data[user_id]
+        else:
+            # Если пользователь просто написал текст
+            bot.send_message(
+                user_id,
+                "Пожалуйста, сначала выберите район и категорию обращения.\n\n"
+                "Используйте кнопки на клавиатуре.",
+                reply_markup=create_district_keyboard()
+            )
+    
+    @bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'sticker'])
+    def handle_media(message):
+        """Обработчик медиа-сообщений"""
         bot.send_message(
-            user_id,
-            response,
-            parse_mode="HTML",
+            message.chat.id,
+            "📎 Я могу обрабатывать только текстовые сообщения.\n\n"
+            "Пожалуйста, выберите район и категорию, затем опишите ваше обращение текстом.",
             reply_markup=create_district_keyboard()
         )
-        
-        # Очищаем данные пользователя
-        if user_id in user_data:
-            del user_data[user_id]
-    else:
-        # Если пользователь просто написал текст
-        bot.send_message(
-            user_id,
-            "Пожалуйста, сначала выберите район и категорию обращения.\n\n"
-            "Используйте кнопки на клавиатуре.",
-            reply_markup=create_district_keyboard()
-        )
-
-@bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'sticker'])
-def handle_media(message):
-    """Обработчик медиа-сообщений"""
-    bot.send_message(
-        message.chat.id,
-        "📎 Я могу обрабатывать только текстовые сообщения.\n\n"
-        "Пожалуйста, выберите район и категорию, затем опишите ваше обращение текстом.",
-        reply_markup=create_district_keyboard()
-    )
 
 # ============ ЗАПУСК ============
 
 if __name__ == "__main__":
-    # Автоматическая установка вебхука при запуске
-    logger.info("🚀 Запуск приложения...")
+    if not bot:
+        logger.error("❌ Приложение запущено без токена бота!")
+        logger.error("Установите переменную окружения TELEGRAM_TOKEN")
     
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-        webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"🌐 Вебхук установлен на: {webhook_url}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки вебхука: {e}")
+    # Автоматическая установка вебхука при запуске (только если есть бот)
+    if bot:
+        try:
+            bot.remove_webhook()
+            time.sleep(1)
+            webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+            bot.set_webhook(url=webhook_url)
+            logger.info(f"🌐 Вебхук установлен на: {webhook_url}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки вебхука: {e}")
     
     # Запуск Flask приложения
     port = int(os.getenv('PORT', 10000))
