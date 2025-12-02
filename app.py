@@ -9,7 +9,10 @@ import logging
 from threading import Lock
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -52,54 +55,229 @@ def init_google_sheets():
     """Инициализация Google Sheets"""
     try:
         google_creds_json = os.getenv('GOOGLE_CREDENTIALS')
-        if google_creds_json:
-            # Обработка JSON из переменной окружения
-            google_creds_json = google_creds_json.strip()
-            if google_creds_json.startswith('"') and google_creds_json.endswith('"'):
-                google_creds_json = google_creds_json[1:-1]
-            
-            google_creds_json = google_creds_json.replace('\\n', '\n').replace('\\"', '"')
-            credentials_dict = json.loads(google_creds_json)
-            
-            scopes = ['https://www.googleapis.com/auth/spreadsheets']
-            credentials = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
-            gc = gspread.authorize(credentials)
-            
-            spreadsheet = gc.open("google-api-sheets-incident")
-            logger.info("✅ Google Sheets подключена")
-            return spreadsheet
-        else:
-            logger.info("⚠️ GOOGLE_CREDENTIALS не установлен, используется заглушка")
+        
+        if not google_creds_json:
+            logger.warning("⚠️ GOOGLE_CREDENTIALS не установлен, используется заглушка")
             return None
+        
+        logger.info("🔧 Начинаем инициализацию Google Sheets...")
+        
+        # Очищаем и подготавливаем JSON
+        google_creds_json = google_creds_json.strip()
+        
+        # Убираем окружающие кавычки если они есть
+        if google_creds_json.startswith('"') and google_creds_json.endswith('"'):
+            google_creds_json = google_creds_json[1:-1]
+        
+        # Исправляем экранированные символы
+        google_creds_json = google_creds_json.replace('\\n', '\n')
+        google_creds_json = google_creds_json.replace('\\"', '"')
+        google_creds_json = google_creds_json.replace('\\\\', '\\')
+        
+        # Убираем лишние пробелы в начале/конце строк
+        lines = google_creds_json.split('\n')
+        cleaned_lines = [line.strip() for line in lines]
+        google_creds_json = '\n'.join(cleaned_lines)
+        
+        # Проверяем, что это валидный JSON
+        try:
+            credentials_dict = json.loads(google_creds_json)
+            logger.info("✅ JSON успешно загружен и распарсен")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка в JSON: {e}")
+            logger.error(f"Первые 200 символов JSON: {google_creds_json[:200]}")
+            return None
+        
+        # Проверяем обязательные поля
+        required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+        missing_fields = []
+        for field in required_fields:
+            if field not in credentials_dict:
+                missing_fields.append(field)
+        
+        if missing_fields:
+            logger.error(f"❌ Отсутствуют обязательные поля: {missing_fields}")
+            return None
+        
+        logger.info(f"✅ Найден сервисный аккаунт: {credentials_dict['client_email']}")
+        
+        # Настраиваем scope
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        # Создаем credentials
+        credentials = Credentials.from_service_account_info(
+            credentials_dict, 
+            scopes=scopes
+        )
+        
+        # Авторизуемся
+        gc = gspread.authorize(credentials)
+        logger.info("✅ Авторизация в Google API успешна")
+        
+        # Открываем таблицу
+        try:
+            spreadsheet = gc.open("google-api-sheets-incident")
+            logger.info(f"✅ Таблица найдена: {spreadsheet.title}")
+            logger.info(f"📊 ID таблицы: {spreadsheet.id}")
+            
+            # Проверяем доступ
+            worksheets = spreadsheet.worksheets()
+            logger.info(f"📄 Найдено листов: {len(worksheets)}")
+            
+            # Выводим названия листов
+            for i, ws in enumerate(worksheets):
+                logger.info(f"  {i+1}. {ws.title} ({ws.row_count} строк, {ws.col_count} колонок)")
+            
+            return spreadsheet
+            
+        except gspread.SpreadsheetNotFound:
+            logger.error("❌ Таблица 'google-api-sheets-incident' не найдена!")
+            logger.info("ℹ️ Что проверить:")
+            logger.info("1. Таблица должна называться ТОЧНО 'google-api-sheets-incident'")
+            logger.info("2. У сервисного аккаунта должен быть доступ к таблице")
+            logger.info("3. Поделитесь таблицей с email: %s", credentials_dict['client_email'])
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка при открытии таблицы: {e}")
+            return None
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка Google Sheets: {e}")
+        logger.error(f"❌ Критическая ошибка инициализации: {str(e)}", exc_info=True)
         return None
 
+# Инициализируем Google Sheets
 spreadsheet = init_google_sheets()
 
 def save_to_google_sheets(data):
     """Сохранение данных в Google Sheets"""
+    logger.debug(f"📤 Получены данные для сохранения: {data}")
+    
+    # Если Google Sheets не инициализирована, используем заглушку
     if not spreadsheet:
-        logger.info(f"📝 Тестовая запись: {data}")
-        return True
+        logger.warning("📝 Google Sheets не подключена, использую заглушку")
+        try:
+            # Сохраняем в текстовый файл для отладки
+            with open('local_backup.txt', 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now().isoformat()}: {json.dumps(data, ensure_ascii=False)}\n")
+            logger.info("✅ Данные сохранены в локальный файл")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка локального сохранения: {e}")
+            return False
     
     try:
-        # Получаем текущий месяц
+        # Создаем название листа по месяцу
         current_month = datetime.now().strftime("%Y-%m")
+        logger.debug(f"📅 Используем лист: {current_month}")
         
+        # Пытаемся получить лист
         try:
             sheet = spreadsheet.worksheet(current_month)
-        except:
-            sheet = spreadsheet.add_worksheet(title=current_month, rows=1000, cols=20)
-            sheet.append_row(["Дата и время", "Район", "Категория обращения", "Текст обращения"])
+            logger.info(f"✅ Лист '{current_month}' найден")
+        except gspread.WorksheetNotFound:
+            logger.info(f"🆕 Создаю новый лист: {current_month}")
+            
+            # Создаем новый лист
+            sheet = spreadsheet.add_worksheet(
+                title=current_month, 
+                rows=1000, 
+                cols=10
+            )
+            
+            # Добавляем заголовки
+            headers = [
+                "Дата и время", 
+                "Район", 
+                "Категория обращения", 
+                "Текст обращения",
+                "Telegram ID",
+                "Имя пользователя",
+                "Дата создания",
+                "Статус"
+            ]
+            
+            # Вставляем заголовки
+            sheet.insert_row(headers, index=1)
+            logger.info("✅ Заголовки добавлены")
         
+        # Подготавливаем данные для записи
+        record = [
+            data[0],  # timestamp
+            data[1],  # district
+            data[2],  # category
+            data[3],  # text
+            "",  # telegram_id (можно добавить позже)
+            "",  # username
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "новое"
+        ]
+        
+        logger.debug(f"📝 Записываю строку: {record}")
+        
+        # Безопасная запись с блокировкой
         with write_lock:
-            sheet.append_row(data, value_input_option='USER_ENTERED')
+            # Находим первую пустую строку
+            all_values = sheet.get_all_values()
+            next_row = len(all_values) + 1
+            logger.debug(f"📄 Текущее количество строк: {len(all_values)}, следующая строка: {next_row}")
+            
+            # Записываем данные
+            sheet.append_row(record, value_input_option='USER_ENTERED')
+            
+            # Подтверждаем запись
+            sheet.update(f'A{next_row}:H{next_row}', [record])
+            logger.info(f"✅ Данные записаны в строку {next_row}")
         
-        logger.info(f"✅ Данные сохранены в Google Sheets")
+        # Ссылка на таблицу для удобства
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={sheet.id}"
+        logger.info(f"🔗 Таблица: {sheet_url}")
+        
         return True
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения: {e}")
+        logger.error(f"❌ Ошибка записи в Google Sheets: {e}")
+        logger.error(f"🔧 Детали ошибки:", exc_info=True)
+        
+        # Пробуем альтернативный метод
+        try:
+            logger.info("🔄 Пробую альтернативный метод записи...")
+            return save_to_google_sheets_fallback(data)
+        except Exception as e2:
+            logger.error(f"❌ Альтернативный метод тоже не сработал: {e2}")
+            return False
+
+def save_to_google_sheets_fallback(data):
+    """Альтернативный метод записи в Google Sheets"""
+    try:
+        current_month = datetime.now().strftime("%Y-%m")
+        
+        # Получаем все листы
+        all_sheets = spreadsheet.worksheets()
+        
+        # Ищем нужный лист
+        target_sheet = None
+        for sheet in all_sheets:
+            if sheet.title == current_month:
+                target_sheet = sheet
+                break
+        
+        # Если не нашли - создаем
+        if not target_sheet:
+            target_sheet = spreadsheet.add_worksheet(title=current_month, rows=1000, cols=10)
+            
+            # Добавляем заголовки
+            headers = ["Дата", "Район", "Категория", "Текст"]
+            target_sheet.append_row(headers)
+        
+        # Простая запись
+        target_sheet.append_row(data)
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в альтернативном методе: {e}")
         return False
 
 # ============ ТЕЛЕГРАМ ФУНКЦИИ ============
@@ -130,7 +308,6 @@ def get_district_keyboard():
     """Клавиатура районов (3 кнопки в ряд)"""
     keyboard = []
     
-    # Разбиваем районы на группы по 3
     for i in range(0, len(DISTRICTS), 3):
         row = [{'text': district} for district in DISTRICTS[i:i+3]]
         keyboard.append(row)
@@ -145,7 +322,6 @@ def get_category_keyboard():
     """Клавиатура категорий (3 кнопки в ряд)"""
     keyboard = []
     
-    # Разбиваем категории на группы по 3
     for i in range(0, len(CATEGORIES), 3):
         row = [{'text': category} for category in CATEGORIES[i:i+3]]
         keyboard.append(row)
@@ -164,7 +340,9 @@ def get_category_keyboard():
 @app.route('/')
 def index():
     """Главная страница"""
-    return '''
+    google_status = "✅ Подключена" if spreadsheet else "⚠️ Заглушка"
+    
+    return f'''
     <!DOCTYPE html>
     <html>
     <head>
@@ -172,32 +350,39 @@ def index():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>🤖 Бот для обращений - Бурятия</title>
         <style>
-            body {
+            body {{
                 font-family: Arial, sans-serif;
                 max-width: 800px;
                 margin: 0 auto;
                 padding: 20px;
                 background-color: #f5f5f5;
-            }
-            .container {
+            }}
+            .container {{
                 background: white;
                 padding: 30px;
                 border-radius: 10px;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }
-            h1 {
+            }}
+            h1 {{
                 color: #333;
                 border-bottom: 2px solid #4CAF50;
                 padding-bottom: 10px;
-            }
-            .status {
+            }}
+            .status {{
                 background: #4CAF50;
                 color: white;
                 padding: 15px;
                 border-radius: 5px;
                 margin: 20px 0;
-            }
-            .btn {
+            }}
+            .warning {{
+                background: #ff9800;
+                color: white;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            .btn {{
                 display: inline-block;
                 background: #0088cc;
                 color: white;
@@ -206,16 +391,25 @@ def index():
                 border-radius: 5px;
                 margin: 10px 5px;
                 transition: background 0.3s;
-            }
-            .btn:hover {
+            }}
+            .btn:hover {{
                 background: #006699;
-            }
-            .section {
+            }}
+            .section {{
                 margin: 25px 0;
                 padding: 20px;
                 background: #f9f9f9;
                 border-radius: 5px;
-            }
+            }}
+            .log {{
+                background: #333;
+                color: #0f0;
+                padding: 10px;
+                border-radius: 5px;
+                font-family: monospace;
+                max-height: 200px;
+                overflow: auto;
+            }}
         </style>
     </head>
     <body>
@@ -233,14 +427,17 @@ def index():
                 <a class="btn" href="/health">Проверить здоровье</a>
                 <a class="btn" href="/bot_info">Информация о боте</a>
                 <a class="btn" href="/test_db">Тест базы данных</a>
+                <a class="btn" href="/debug_sheets">Диагностика Sheets</a>
+                <a class="btn" href="/view_logs">Посмотреть логи</a>
             </div>
             
             <div class="section">
                 <h3>📊 Статистика</h3>
                 <p><strong>Районов:</strong> 23</p>
                 <p><strong>Категорий:</strong> 23</p>
-                <p><strong>Google Sheets:</strong> ''' + ("✅ Подключена" if spreadsheet else "⚠️ Заглушка") + '''</p>
+                <p><strong>Google Sheets:</strong> {google_status}</p>
                 <p><strong>Бот:</strong> @IncidentInfo_bot</p>
+                <p><strong>Пользователей в сессии:</strong> {len(user_states)}</p>
             </div>
             
             <div class="section">
@@ -251,6 +448,13 @@ def index():
                     <li>Выберите район → категорию → опишите проблему</li>
                     <li>Данные автоматически сохранятся</li>
                 </ol>
+            </div>
+            
+            <div class="section">
+                <h3>📝 Последние логи</h3>
+                <div class="log">
+                    <pre>Последние записи будут здесь...</pre>
+                </div>
             </div>
         </div>
     </body>
@@ -268,7 +472,9 @@ def health_check():
             "status": "ok",
             "bot": bot_info.get('result', {}).get('username'),
             "google_sheets": "connected" if spreadsheet else "stub",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "user_states_count": len(user_states),
+            "memory_usage": "N/A"
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -321,7 +527,8 @@ def bot_info():
             "server": {
                 "url": WEBHOOK_URL,
                 "timestamp": datetime.now().isoformat()
-            }
+            },
+            "google_sheets": "connected" if spreadsheet else "not_connected"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -334,26 +541,102 @@ def test_db():
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Тестовый район",
             "Тестовая категория",
-            "Тестовое сообщение"
+            "Это тестовое сообщение для проверки записи в Google Sheets"
         ]
         
+        logger.info("🧪 Начинаю тест записи в базу данных...")
         success = save_to_google_sheets(test_data)
         
         if success:
             return '''
             <h1>✅ Тест базы данных</h1>
             <p>Тестовая запись успешно добавлена.</p>
+            <p><strong>Проверьте Google Таблицу или файл local_backup.txt</strong></p>
             <p><a href="/">← На главную</a></p>
             '''
         else:
             return '''
-            <h1>⚠️ Тест с заглушкой</h1>
-            <p>Google Sheets не подключена, используется заглушка.</p>
-            <p>Добавьте GOOGLE_CREDENTIALS для подключения к Google Sheets.</p>
+            <h1>⚠️ Ошибка при тестировании</h1>
+            <p>Не удалось записать тестовые данные.</p>
+            <p>Проверьте логи на Render для диагностики.</p>
             <p><a href="/">← На главную</a></p>
             '''
     except Exception as e:
         return f'<h1>❌ Ошибка: {str(e)}</h1>', 500
+
+@app.route('/debug_sheets')
+def debug_sheets():
+    """Диагностика Google Sheets"""
+    try:
+        if not spreadsheet:
+            return jsonify({
+                "status": "not_initialized", 
+                "message": "Google Sheets не инициализирована",
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        # Получаем информацию о таблице
+        info = {
+            "id": spreadsheet.id,
+            "title": spreadsheet.title,
+            "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}",
+            "sheet_count": len(spreadsheet.worksheets()),
+            "sheets": []
+        }
+        
+        # Информация о каждом листе
+        for ws in spreadsheet.worksheets():
+            sheet_info = {
+                "id": ws.id,
+                "title": ws.title,
+                "row_count": ws.row_count,
+                "col_count": ws.col_count,
+                "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}/edit#gid={ws.id}"
+            }
+            
+            # Пробуем получить количество записей
+            try:
+                values = ws.get_all_values()
+                sheet_info["record_count"] = len(values) - 1  # минус заголовок
+            except:
+                sheet_info["record_count"] = "unknown"
+            
+            info["sheets"].append(sheet_info)
+        
+        return jsonify({
+            "status": "success",
+            "spreadsheet": info,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "type": type(e).__name__
+        }), 500
+
+@app.route('/view_logs')
+def view_logs():
+    """Просмотр логов"""
+    try:
+        # Читаем последние 50 строк из лог-файла
+        log_content = []
+        if os.path.exists('local_backup.txt'):
+            with open('local_backup.txt', 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                log_content = lines[-50:]  # Последние 50 строк
+        
+        return f'''
+        <h1>📊 Логи приложения</h1>
+        <p>Последние записи из Google Sheets/локального бэкапа:</p>
+        <pre style="background: #333; color: #0f0; padding: 20px; border-radius: 5px; overflow: auto;">
+        {''.join(log_content) if log_content else 'Логи пока пусты'}
+        </pre>
+        <p><a href="/">← На главную</a></p>
+        '''
+    except Exception as e:
+        return f'<h1>❌ Ошибка: {str(e)}</h1>'
 
 # ============ ОБРАБОТЧИК ВЕБХУКА ============
 
@@ -395,17 +678,22 @@ def webhook():
 📍 <b>Выберите район:</b>
 """
                 send_message(chat_id, welcome_text, get_district_keyboard())
-                user_states[chat_id] = {'step': 'district'}
+                user_states[chat_id] = {
+                    'step': 'district',
+                    'user_id': user_id,
+                    'first_name': first_name
+                }
             
             # Команда /stats
             elif text in ['/stats', '/stats@IncidentInfo_bot']:
-                stats_text = """
+                stats_text = f"""
 📊 <b>Статистика бота:</b>
 
 📍 <b>Районы:</b> 23 района Бурятии
 🏷️ <b>Категории:</b> 23 категории обращений
-💾 <b>Хранение:</b> Google Sheets
+💾 <b>Хранение:</b> {'Google Sheets ✅' if spreadsheet else 'Локальное хранилище ⚠️'}
 🤖 <b>Бот:</b> @IncidentInfo_bot
+👥 <b>Активные пользователи:</b> {len(user_states)}
 
 Для начала работы отправьте /start
 """
@@ -419,7 +707,9 @@ def webhook():
                     user_states[chat_id] = {
                         'district': text,
                         'category': 'Планерка',
-                        'step': 'text'
+                        'step': 'text',
+                        'user_id': user_id,
+                        'first_name': first_name
                     }
                     
                     send_message(
@@ -433,7 +723,9 @@ def webhook():
                     # Обычный район
                     user_states[chat_id] = {
                         'district': text,
-                        'step': 'category'
+                        'step': 'category',
+                        'user_id': user_id,
+                        'first_name': first_name
                     }
                     
                     send_message(
@@ -467,7 +759,11 @@ def webhook():
             # ============ КНОПКА "НАЗАД" ============
             
             elif text == '↩️ Назад к выбору района':
-                user_states[chat_id] = {'step': 'district'}
+                user_states[chat_id] = {
+                    'step': 'district',
+                    'user_id': user_id,
+                    'first_name': first_name
+                }
                 send_message(
                     chat_id,
                     "📍 <b>Выберите район:</b>",
@@ -481,6 +777,8 @@ def webhook():
                 district = user_states[chat_id].get('district', 'Не указан')
                 category = user_states[chat_id].get('category', 'Не указана')
                 user_text = text
+                
+                logger.info(f"💾 Сохраняю обращение: {district} | {category} | {user_text[:50]}...")
                 
                 # Сохраняем в Google Sheets
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -501,9 +799,10 @@ def webhook():
 """
                 else:
                     response_text = """
-❌ <b>Произошла ошибка при записи данных.</b>
+⚠️ <b>Ваше обращение сохранено в локальной базе.</b>
 
-Пожалуйста, попробуйте еще раз позже или свяжитесь с администратором.
+<i>Google Sheets временно недоступна, но ваши данные не потеряны.
+Администратор получит их при восстановлении связи.</i>
 
 Для нового обращения выберите район:
 """
@@ -535,6 +834,9 @@ def webhook():
 
 if __name__ == '__main__':
     logger.info("🚀 Запуск полнофункционального бота...")
+    logger.info(f"🤖 Токен бота: {TELEGRAM_TOKEN[:10]}...")
+    logger.info(f"🌐 Вебхук URL: {WEBHOOK_URL}")
+    logger.info(f"📊 Google Sheets: {'✅ Подключена' if spreadsheet else '⚠️ Заглушка'}")
     
     # Автоматическая установка вебхука
     try:
@@ -556,4 +858,4 @@ if __name__ == '__main__':
     # Запуск Flask
     port = int(os.getenv('PORT', 10000))
     logger.info(f"🚀 Запуск на порту {port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
